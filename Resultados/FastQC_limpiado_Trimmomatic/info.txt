@@ -1,0 +1,1 @@
+Archivos tras limpiar con Trimmomatic y realizar de nuevo FastQC
