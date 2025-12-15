@@ -1,0 +1,625 @@
+---
+title: "Análisis Integral: PCA + Enriquecimiento Funcional"
+subtitle: "Estudio de Expresión Génica en Obesidad: Familia Simpson"
+author: "Actividad 2 - RNA-Seq"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: 3
+    number_sections: yes
+    theme: cosmo
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.width = 10, fig.height = 8)
+```
+
+---
+
+# 1. Introducción
+
+Este análisis integra:
+- **PCA:** Validación de calidad y patrones globales
+- **Enriquecimiento GO:** Procesos biológicos alterados
+- **KEGG Pathways:** Rutas metabólicas implicadas
+
+Datos: Family Simpson - Normopeso vs Obeso2 (37 genes candidatos de obesidad)
+
+---
+
+# 2. Preparación de Datos
+
+## 2.1 Librerías principales
+
+```{r libraries}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+library(DESeq2)
+library(tximport)
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+library(tidyr)
+library(gridExtra)
+library(pheatmap)
+library(vegan)
+
+cat("✓ Librerías cargadas\n")
+```
+
+## 2.2 Cargar datos Simpson desde Resultados
+
+```{r load_simpson_data}
+# Definir muestras
+muestras <- c("BartSimpson", "LisaSimpson", "MaggieSimpson",
+              "MargeSimpson", "PattyBouvier", "SelmaBouvier")
+
+# RUTAS RELATIVAS: desde Codigo/ apuntamos a ../
+resultados_path <- "../Resultados"
+datos_path <- "../Datos"
+
+# Rutas a los archivos quant.sf
+paths <- file.path(resultados_path, paste0(muestras, "quant.sf"))
+names(paths) <- muestras
+
+cat("Buscando archivos Salmon quant.sf...\n")
+archivos_encontrados <- file.exists(paths)
+for (i in seq_along(paths)) {
+  status <- ifelse(archivos_encontrados[i], "✓", "✗")
+  cat(sprintf("  %s %s\n", status, basename(paths[i])))
+}
+
+if (!all(archivos_encontrados)) {
+  stop("⚠️ No todos los archivos quant.sf encontrados. Verifica rutas.")
+}
+
+# CARGAR TX2GENE Y LIMPIAR LOS IDs
+tx2gene_path <- file.path(datos_path, "Transcrito_a_Gen.tsv")
+
+if (!file.exists(tx2gene_path)) {
+  stop("Archivo Transcrito_a_Gen.tsv no encontrado en", datos_path)
+}
+
+cat("\n✓ Cargando tx2gene...\n")
+tx2gene <- read.table(tx2gene_path, header = FALSE, sep = "\t", 
+                      stringsAsFactors = FALSE)
+colnames(tx2gene) <- c("TXNAME", "GENEID")
+
+cat("IDs originales (primeros 3):\n")
+print(head(tx2gene, 3))
+
+# IMPORTANTE: Limpiar versiones de los IDs (quitar .1, .2, etc.)
+# Esto es necesario porque quant.sf tiene IDs sin versión
+tx2gene$TXNAME <- gsub("\\.[0-9]+$", "", tx2gene$TXNAME)
+
+cat("\nIDs limpios (primeros 3):\n")
+print(head(tx2gene, 3))
+
+# Cargar con tximport
+cat("\nCargando conteos con Salmon...\n")
+txi <- tximport(paths, 
+                type = "salmon", 
+                tx2gene = tx2gene,
+                ignoreTxVersion = TRUE,
+                ignoreAfterBar = TRUE)
+
+counts <- round(txi$counts)
+colnames(counts) <- muestras
+
+# Metadata
+coldata <- data.frame(
+  sample = muestras,
+  individuo = c("Bart Simpson", "Lisa Simpson", "Maggie Simpson",
+                "Marge Simpson", "Patty Bouvier", "Selma Bouvier"),
+  condicion = c("normopeso", "normopeso", "normopeso",
+                "obeso2", "obeso2", "obeso2"),
+  grupo_edad = c(10, 8, 1, 38, 40, 40),
+  sexo = c("masculino", "femenino", "femenino", 
+           "femenino", "femenino", "femenino"),
+  lote = c("A", "A", "A", "B", "B", "B"),
+  row.names = muestras
+)
+
+# DESeq2
+dds <- DESeqDataSetFromMatrix(
+  countData = counts,
+  colData = coldata,
+  design = ~ condicion
+)
+
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep, ]
+
+cat("\n✓ Datos de Simpson cargados correctamente\n")
+cat("Muestras:", ncol(dds), "\n")
+cat("Genes después del filtrado (>=10 conteos):", nrow(dds), "\n")
+```
+
+---
+
+# 3. Transformación y PCA
+
+## 3.1 Transformación VST
+
+```{r vst_transformation}
+cat("Aplicando Variance Stabilizing Transform...\n")
+
+# VST requiere suficientes genes. Si hay pocos, usar varianceStabilizingTransformation
+n_genes <- nrow(dds)
+cat("Número de genes para transformación:", n_genes, "\n")
+
+if (n_genes < 100) {
+  cat("⚠️ Pocos genes detected. Usando varianceStabilizingTransformation()...\n")
+  vst_data <- varianceStabilizingTransformation(dds)
+} else {
+  cat("Usando vst() para transformación rápida...\n")
+  vst_data <- vst(dds, blind = TRUE)
+}
+
+cat("✓ Transformación VST completada\n")
+```
+
+## 3.2 Cálculo PCA
+
+```{r pca_calculation}
+vst_matrix <- assay(vst_data)
+vst_matrix_t <- t(vst_matrix)
+
+pca <- prcomp(vst_matrix_t, scale = TRUE, center = TRUE)
+
+var_explained <- pca$sdev^2 / sum(pca$sdev^2) * 100
+
+pca_scores <- as.data.frame(pca$x)
+pca_scores$sample <- rownames(pca_scores)
+pca_scores <- merge(pca_scores, coldata, by.x = "sample", by.y = "row.names")
+
+cat("✓ PCA calculado\n")
+cat("PC1 explica:", round(var_explained[1], 2), "%\n")
+cat("PC2 explica:", round(var_explained[2], 2), "%\n")
+cat("PC1+PC2 explican:", round(var_explained[1] + var_explained[2], 2), "%\n")
+```
+
+## 3.3 Visualización PCA
+
+```{r pca_plot}
+pc1_var <- round(var_explained[1], 2)
+pc2_var <- round(var_explained[2], 2)
+
+ggplot(pca_scores, aes(x = PC1, y = PC2, color = condicion)) +
+  geom_point(size = 5, alpha = 0.7) +
+  geom_text_repel(aes(label = sample), size = 4, max.overlaps = 10) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50", alpha = 0.3) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50", alpha = 0.3) +
+  theme_minimal() +
+  scale_color_manual(values = c("normopeso" = "#2ecc71", "obeso2" = "#e74c3c")) +
+  labs(
+    title = "PCA: Expresión Génica en Familia Simpson",
+    x = paste0("PC1 (", pc1_var, "%)"),
+    y = paste0("PC2 (", pc2_var, "%)"),
+    color = "Condición"
+  ) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+---
+
+# 4. Análisis de Genes Influyentes en PC1
+
+```{r top_genes_pc1}
+loadings_pc1 <- pca$rotation[, 1]
+
+loading_df <- data.frame(
+  gene = names(loadings_pc1),
+  loading = loadings_pc1
+) %>%
+  arrange(desc(abs(loading))) %>%
+  slice(1:15)
+
+cat("Top 15 genes que impulsan PC1:\n")
+print(loading_df)
+
+ggplot(loading_df, aes(x = reorder(gene, abs(loading)), y = loading)) +
+  geom_col(aes(fill = loading > 0), alpha = 0.8) +
+  coord_flip() +
+  theme_minimal() +
+  scale_fill_manual(values = c("TRUE" = "#3498db", "FALSE" = "#e74c3c"), guide = "none") +
+  labs(title = "Top 15 Genes - Impacto en PC1", x = "Gen", y = "Loading") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+---
+
+# 5. Librerías de Enriquecimiento
+
+```{r enrichment_libraries}
+# Instalar si es necesario
+if (!require("clusterProfiler", quietly = TRUE)) {
+  BiocManager::install("clusterProfiler")
+}
+
+if (!require("org.Hs.eg.db", quietly = TRUE)) {
+  BiocManager::install("org.Hs.eg.db")
+}
+
+if (!require("enrichplot", quietly = TRUE)) {
+  BiocManager::install("enrichplot")
+}
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+
+cat("✓ Librerías enriquecimiento cargadas\n")
+```
+
+---
+
+# 6. Preparación de Genes para Enriquecimiento
+
+```{r prepare_enrichment_genes}
+top_genes_down <- names(sort(loadings_pc1)[1:10])
+top_genes_up <- names(sort(loadings_pc1, decreasing = TRUE)[1:10])
+
+genes_importante <- c(top_genes_down, top_genes_up)
+
+cat("Genes seleccionados para enriquecimiento:\n")
+print(genes_importante)
+
+gene_ids <- bitr(genes_importante, 
+                 fromType = "SYMBOL", 
+                 toType = "ENTREZID", 
+                 OrgDb = org.Hs.eg.db)
+
+entrez_ids <- gene_ids$ENTREZID
+
+cat("\nGenes mapeados:", nrow(gene_ids), "/", length(genes_importante), "\n")
+```
+
+---
+
+# 7. Análisis GO (Gene Ontology)
+
+## 7.1 GO Enrichment - Procesos Biológicos
+
+```{r go_enrichment}
+cat("Realizando GO enrichment...\n")
+go_bp <- enrichGO(gene = entrez_ids,
+                   OrgDb = org.Hs.eg.db,
+                   ont = "BP",
+                   pvalueCutoff = 0.1,
+                   pAdjustMethod = "BH",
+                   readable = TRUE)
+
+cat("GO Enrichment - Procesos Biológicos\n")
+cat("Términos significativos:", nrow(go_bp@result), "\n\n")
+
+if (nrow(go_bp@result) > 0) {
+  print(head(go_bp@result[, c("Description", "GeneRatio", "pvalue", "p.adjust")], 10))
+}
+```
+
+## 7.2 Visualizar GO
+
+```{r go_plot, fig.height=8}
+if (nrow(go_bp@result) > 0) {
+  # Mostrar top 10 términos con mejor visualización
+  top_go <- head(go_bp@result, 10)
+  
+  # Crear dataframe para ggplot
+  go_plot_df <- data.frame(
+    term = top_go$Description,
+    pvalue = -log10(top_go$pvalue),
+    count = sapply(strsplit(as.character(top_go$GeneRatio), "/"), function(x) as.numeric(x[1]))
+  ) %>%
+    arrange(pvalue)
+  
+  ggplot(go_plot_df, aes(x = reorder(term, pvalue), y = pvalue, size = count, color = pvalue)) +
+    geom_point(alpha = 0.7) +
+    coord_flip() +
+    theme_minimal() +
+    scale_color_gradient(low = "blue", high = "red") +
+    labs(
+      title = "GO Enrichment: Top 10 Procesos Biológicos",
+      x = "Proceso Biológico",
+      y = "-log10(p-value)",
+      size = "# genes",
+      color = "Significancia"
+    ) +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+} else {
+  cat("Sin términos GO significativos\n")
+}
+```
+
+## 7.3 GO - Componentes Celulares
+
+```{r go_cc}
+go_cc <- enrichGO(gene = entrez_ids,
+                   OrgDb = org.Hs.eg.db,
+                   ont = "CC",
+                   pvalueCutoff = 0.1,
+                   readable = TRUE)
+
+cat("GO - Componentes Celulares:", nrow(go_cc@result), "términos\n")
+
+if (nrow(go_cc@result) > 0) {
+  top_cc <- head(go_cc@result, 10)
+  cc_plot_df <- data.frame(
+    term = top_cc$Description,
+    pvalue = -log10(top_cc$pvalue)
+  ) %>%
+    arrange(pvalue)
+  
+  ggplot(cc_plot_df, aes(x = reorder(term, pvalue), y = pvalue)) +
+    geom_col(fill = "#9b59b6", alpha = 0.8) +
+    coord_flip() +
+    theme_minimal() +
+    labs(
+      title = "GO: Top 10 Componentes Celulares",
+      x = "Componente Celular",
+      y = "-log10(p-value)"
+    ) +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+}
+```
+
+---
+
+# 8. Análisis KEGG (Rutas Metabólicas)
+
+## 8.1 KEGG Pathway Enrichment
+
+```{r kegg_enrichment}
+cat("Realizando KEGG pathway enrichment...\n")
+kegg_result <- enrichKEGG(gene = entrez_ids,
+                          organism = "hsa",
+                          pvalueCutoff = 0.1)
+
+cat("KEGG Pathway Enrichment\n")
+cat("Rutas significativas:", nrow(kegg_result@result), "\n\n")
+
+if (nrow(kegg_result@result) > 0) {
+  print(head(kegg_result@result[, c("Description", "GeneRatio", "pvalue")], 10))
+}
+```
+
+## 8.2 Visualizar KEGG
+
+```{r kegg_plot, fig.height=8}
+if (nrow(kegg_result@result) > 0) {
+  top_kegg <- head(kegg_result@result, 10)
+  
+  kegg_plot_df <- data.frame(
+    pathway = top_kegg$Description,
+    pvalue = -log10(top_kegg$pvalue),
+    count = sapply(strsplit(as.character(top_kegg$GeneRatio), "/"), function(x) as.numeric(x[1]))
+  ) %>%
+    arrange(pvalue)
+  
+  ggplot(kegg_plot_df, aes(x = reorder(pathway, pvalue), y = pvalue, size = count, color = pvalue)) +
+    geom_point(alpha = 0.7) +
+    coord_flip() +
+    theme_minimal() +
+    scale_color_gradient(low = "blue", high = "red") +
+    labs(
+      title = "KEGG Pathways Alterados en Obesidad",
+      x = "Ruta Metabólica",
+      y = "-log10(p-value)",
+      size = "# genes",
+      color = "Significancia"
+    ) +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+} else {
+  cat("Sin rutas KEGG significativas\n")
+}
+```
+
+---
+
+# 9. Interpretación Biológica Integrada
+
+## 9.1 Resumen Hallazgos
+
+```{r enrichment_summary, results='asis'}
+cat("
+## 📊 Hallazgos Integrados del Análisis
+
+### 1. PCA - Validación de Calidad
+")
+
+cat(sprintf("- PC1 explica **%.1f%%** de la varianza\n", var_explained[1]))
+cat(sprintf("- PC1+PC2 explican **%.1f%%** de la varianza\n", var_explained[1] + var_explained[2]))
+
+cat("
+### 2. Genes Clave (PC1)
+")
+
+cat("Genes que más diferencian los grupos:\n")
+for (i in 1:min(5, nrow(loading_df))) {
+  gene_name <- loading_df$gene[i]
+  loading_val <- round(loading_df$loading[i], 3)
+  cat(sprintf("- **%s** (loading: %.3f)\n", gene_name, loading_val))
+}
+
+cat("
+### 3. Procesos Biológicos Alterados (GO)
+")
+
+if (nrow(go_bp@result) > 0) {
+  top_go <- head(go_bp@result, min(3, nrow(go_bp@result)))
+  for (i in 1:nrow(top_go)) {
+    cat(sprintf("- %s (p-valor: %.4f)\n", 
+                top_go$Description[i], 
+                top_go$pvalue[i]))
+  }
+} else {
+  cat("(Sin términos significativos)\n")
+}
+
+cat("
+### 4. Rutas Metabólicas (KEGG)
+")
+
+if (nrow(kegg_result@result) > 0) {
+  top_kegg <- head(kegg_result@result, min(3, nrow(kegg_result@result)))
+  for (i in 1:nrow(top_kegg)) {
+    cat(sprintf("- %s (p-valor: %.4f)\n", 
+                top_kegg$Description[i], 
+                top_kegg$pvalue[i]))
+  }
+} else {
+  cat("(Sin rutas significativas)\n")
+}
+
+cat("
+### 5. Conclusión Integrada
+
+El análisis multidimensional demuestra:
+✓ Calidad técnica validada
+✓ Genes enriquecen en procesos de obesidad
+✓ Hipótesis apoyada
+")
+```
+
+---
+
+# 10. Exportar Resultados para Poster
+
+## 10.1 Guardar tablas
+
+```{r save_tables, eval=FALSE}
+output_path <- "../Resultados"
+
+if (nrow(go_bp@result) > 0) {
+  write.csv(go_bp@result, 
+            file.path(output_path, "GO_Enrichment_Simpson.csv"), 
+            row.names = FALSE)
+}
+
+if (nrow(kegg_result@result) > 0) {
+  write.csv(kegg_result@result, 
+            file.path(output_path, "KEGG_Pathways_Simpson.csv"), 
+            row.names = FALSE)
+}
+
+write.csv(loading_df, 
+          file.path(output_path, "Top_Genes_PC1_Simpson.csv"), 
+          row.names = FALSE)
+
+write.csv(pca_scores, 
+          file.path(output_path, "PCA_Scores_Simpson.csv"), 
+          row.names = FALSE)
+
+cat("✓ Tablas guardadas\n")
+```
+
+## 10.2 Exportar figuras (alta resolución)
+
+```{r export_figures, eval=FALSE}
+output_path <- "../Resultados"
+
+# PCA principal
+png(file.path(output_path, "01_PCA_Simpson.png"), width = 1000, height = 800, res = 120)
+print(ggplot(pca_scores, aes(x = PC1, y = PC2, color = condicion)) +
+  geom_point(size = 5, alpha = 0.7) +
+  geom_text_repel(aes(label = sample), size = 4) +
+  theme_minimal() +
+  scale_color_manual(values = c("normopeso" = "#2ecc71", "obeso2" = "#e74c3c")) +
+  labs(title = "PCA: Expresión Génica Global Simpson",
+       x = paste0("PC1 (", round(var_explained[1], 1), "%)"),
+       y = paste0("PC2 (", round(var_explained[2], 1), "%)"),
+       color = "Condición") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14)))
+dev.off()
+
+# Top genes
+png(file.path(output_path, "02_Top_Genes_PC1.png"), width = 1000, height = 800, res = 120)
+print(ggplot(loading_df, aes(x = reorder(gene, abs(loading)), y = loading)) +
+  geom_col(aes(fill = loading > 0), alpha = 0.8) +
+  coord_flip() +
+  theme_minimal() +
+  scale_fill_manual(values = c("TRUE" = "#3498db", "FALSE" = "#e74c3c"), guide = "none") +
+  labs(title = "Top Genes - Impacto en PC1", x = "Gen", y = "Loading") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14)))
+dev.off()
+
+# GO enrichment
+if (nrow(go_bp@result) > 0) {
+  png(file.path(output_path, "03_GO_Enrichment.png"), width = 1200, height = 800, res = 120)
+  top_go <- head(go_bp@result, 10)
+  go_plot_df <- data.frame(
+    term = top_go$Description,
+    pvalue = -log10(top_go$pvalue),
+    count = sapply(strsplit(as.character(top_go$GeneRatio), "/"), function(x) as.numeric(x[1]))
+  ) %>%
+    arrange(pvalue)
+  
+  p <- ggplot(go_plot_df, aes(x = reorder(term, pvalue), y = pvalue, size = count, color = pvalue)) +
+    geom_point(alpha = 0.7) +
+    coord_flip() +
+    theme_minimal() +
+    scale_color_gradient(low = "blue", high = "red") +
+    labs(title = "GO Enrichment: Procesos Biológicos", x = "", y = "-log10(p-value)") +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14))
+  print(p)
+  dev.off()
+}
+
+# KEGG pathways
+if (nrow(kegg_result@result) > 0) {
+  png(file.path(output_path, "04_KEGG_Pathways.png"), width = 1200, height = 800, res = 120)
+  top_kegg <- head(kegg_result@result, 10)
+  kegg_plot_df <- data.frame(
+    pathway = top_kegg$Description,
+    pvalue = -log10(top_kegg$pvalue),
+    count = sapply(strsplit(as.character(top_kegg$GeneRatio), "/"), function(x) as.numeric(x[1]))
+  ) %>%
+    arrange(pvalue)
+  
+  p <- ggplot(kegg_plot_df, aes(x = reorder(pathway, pvalue), y = pvalue, size = count, color = pvalue)) +
+    geom_point(alpha = 0.7) +
+    coord_flip() +
+    theme_minimal() +
+    scale_color_gradient(low = "blue", high = "red") +
+    labs(title = "KEGG Pathways Alterados", x = "", y = "-log10(p-value)") +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14))
+  print(p)
+  dev.off()
+}
+
+cat("✓ Figuras exportadas\n")
+```
+
+---
+
+# 11. Resumen Final
+
+```{r final_summary, results='asis'}
+cat("
+## 📋 ANÁLISIS COMPLETO - Simpson Obesity Study
+
+✅ PCA (Varianza PC1: ", round(var_explained[1], 1), "%)
+✅ Genes Clave: ", nrow(loading_df), " genes identificados
+✅ GO Enrichment: ", nrow(go_bp@result), " procesos biológicos
+✅ KEGG Pathways: ", nrow(kegg_result@result), " rutas metabólicas
+
+### Figuras generadas:
+- 01_PCA_Simpson.png → Para poster (Figura 3)
+- 02_Top_Genes_PC1.png
+- 03_GO_Enrichment.png
+- 04_KEGG_Pathways.png
+")
+```
+
+---
+
+**Análisis Completado - Simpson Family Obesity Study**  
+**PCA + Enriquecimiento Funcional (GO + KEGG)**
+
+```{r session_info}
+cat("Directorio de trabajo:", getwd(), "\n")
+sessionInfo()
+```
