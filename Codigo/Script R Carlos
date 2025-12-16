@@ -1,3 +1,4 @@
+
 # ============================================================
 # RNA-seq – DESeq2 + Visualización FINAL
 # ============================================================
@@ -60,7 +61,7 @@ sig_genes <- res_df %>% filter(Significant == "Yes")
 
 
 # ============================================================
-# Volcano plot con estética cuidada
+# Volcano 
 # ============================================================
 
 volplot <- ggplot(res_df,
@@ -123,14 +124,74 @@ volplot <- ggplot(res_df,
 volplot
 
 
+# ============================================================
+# MA plot 
+# ============================================================
 
+# Preparar datos (usar el res_df que ya tienes)
+ma_df <- res_df %>%
+  filter(!is.na(baseMean))
 
+sig_ma <- ma_df %>% filter(Significant == "Yes")
 
+MAplot <- ggplot(ma_df,
+                 aes(x = log10(baseMean),
+                     y = log2FoldChange)) +
+  
+  # Genes no significativos
+  geom_point(data = subset(ma_df, Significant == "No"),
+             color = "grey75",
+             size = 2,
+             alpha = 0.6) +
+  
+  # Genes significativos
+  geom_point(data = subset(ma_df, Significant == "Yes"),
+             color = "coral",
+             size = 2.5,
+             alpha = 0.9) +
+  
+  # Etiquetas de genes significativos
+  geom_text_repel(
+    data = sig_ma,
+    aes(label = Gene),
+    size = 3,
+    box.padding = 0.4,
+    point.padding = 0.3,
+    segment.color = "grey50",
+    max.overlaps = Inf
+  ) +
+  
+  # Línea horizontal en 0
+  geom_hline(yintercept = 0,
+             linetype = "dashed",
+             color = "grey40",
+             linewidth = 0.6) +
+  
+  # Límites similares al plotMA clásico
+  coord_cartesian(ylim = c(-5, 5)) +
+  
+  # Etiquetas
+  labs(
+    title = "MA plot – Expresión diferencial",
+    x = expression(log[10]~media~de~expresión),
+    y = expression(log[2]~Fold~Change)
+  ) +
+  
+  # Tema visual
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    axis.title = element_text(size = 11, face = "bold"),
+    axis.text = element_text(size = 10),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(colour = "gray50", fill = NA, linewidth = 1),
+    plot.background = element_rect(colour = "black", fill = NA, linewidth = 1),
+    plot.margin = unit(c(1,1,1,1), "lines")
+  )
 
-# -------------------------------
-# MA plot
-# -------------------------------
-plotMA(dds, main = "MA plot", ylim = c(-5, 5))
+MAplot
+
 
 # -------------------------------
 # Heatmap
@@ -163,9 +224,8 @@ if (length(sig_gene_names) >= 1) {
   message("No significant genes available for heatmap.")
 }
 
-
 # ============================================================
-# BOXPLOTS ESTILO PÓSTER – TODOS LOS GENES SIGNIFICATIVOS
+# Boxplots genes significativos
 # ============================================================
 
 library(ggplot2)
@@ -174,8 +234,8 @@ library(patchwork)
 
 # Colores por condición (ajusta nombres si hace falta)
 cond_colors <- c(
-  "Normopeso" = "coral",
-  "Obeso2" = "lightblue"
+  "Normopeso" = "lightblue",
+  "Obeso2" = "coral"
 )
 
 # Crear boxplots para todos los genes
@@ -204,4 +264,13 @@ plots <- lapply(unique(counts_long$Gene), function(gene_name) {
       plot.margin = unit(c(1,1,1,1), "lines")
     )
 })
+
+# Combinar todos los boxplots en una sola figura
+box_overview <- wrap_plots(plots, ncol = 3) +
+  plot_annotation(
+    title = "Expresión génica por condición",
+    theme = theme(plot.title = element_text(hjust = 0.5, size = 16))
+  )
+
+box_overview
 
