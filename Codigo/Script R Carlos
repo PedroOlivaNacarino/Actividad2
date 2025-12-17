@@ -232,7 +232,7 @@ library(ggplot2)
 library(dplyr)
 library(patchwork)
 
-# Colores por condición (ajusta nombres si hace falta)
+# Colores por condición 
 cond_colors <- c(
   "Normopeso" = "lightblue",
   "Obeso2" = "coral"
